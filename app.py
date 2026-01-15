@@ -112,7 +112,7 @@ def highlight_overlap(target, reference):
     return result.replace("[[MS]]", "<mark>").replace("[[ME]]", "</mark>").replace("</mark><mark>", "")
 
 # --- 메인 실행부 ---
-st.title("🟣 사문/생윤 정밀 문항 분석기")
+st.title("🟣정밀 문항 분석기")
 
 default_links = """모평_수능, https://drive.google.com/file/d/1kf1dZDTFCfAHM9OSAwqaAXI62ClJ3J-S/view?usp=drive_link
 2026 수특 생윤, https://drive.google.com/file/d/1xlcMNaNQIbzA1iLXB9lD6eNYL5LM4_LJ/view?usp=drive_link
@@ -188,3 +188,4 @@ if 'results' in st.session_state:
             else:
                 with c1: st.markdown(f"**[내 문항]**<div class='compare-box'>{res['target']}</div>", unsafe_allow_html=True)
                 with c2: st.info("유사 문항 없음")
+
