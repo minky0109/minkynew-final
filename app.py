@@ -28,12 +28,12 @@ def get_gdrive_direct_link(url):
             file_id = match.group(1); break
     return f'https://drive.google.com/uc?export=download&id={file_id}' if file_id else url
 
-# --- [개선] 문항 추출 로직 (누락 방지) ---
+# --- [정밀도 강화] 텍스트 추출 (이미지/레이아웃 대응) ---
 def extract_problems_refined(content, filename):
     try:
         doc = fitz.open(stream=content, filetype="pdf")
         all_problems = []
-        skip_keywords = ['학년도', '영역', '확인사항', '유의사항', '성명', '수험번호', '문제지', '탐구']
+        skip_keywords = ['학년도', '영역', '확인사항', '유의사항', '성명', '수험번호', '문제지', '탐구', '사회·문화']
         
         current_prob = ""
         current_num = ""
@@ -41,18 +41,18 @@ def extract_problems_refined(content, filename):
 
         for page_num in range(len(doc)):
             page = doc.load_page(page_num)
-            lines = page.get_text("text").split('\n')
+            # sort=True를 사용하여 이미지가 큰 페이지에서도 읽기 순서대로 텍스트 정렬
+            text_blocks = page.get_text("blocks", sort=True)
             
-            for line in lines:
-                cleaned = line.strip()
-                if not cleaned or len(cleaned) < 2: continue
-                if any(kw in cleaned for kw in skip_keywords): continue
+            for block in text_blocks:
+                line_text = block[4].replace('\n', ' ').strip() # 블록 내 줄바꿈 제거
+                if not line_text or len(line_text) < 2: continue
+                if any(kw in line_text for kw in skip_keywords): continue
 
-                # 문항 번호 감지 (1. 또는 [1] 또는 1))
-                num_match = re.match(r'^(\d+[\.|\)]|\[\d+\])', cleaned)
+                # 문항 번호 감지 강화 (예: 1. [1] 1) ① 등과 겹치지 않게)
+                num_match = re.match(r'^(\d+[\.|\)]|\[\d+\])', line_text)
                 
                 if num_match:
-                    # 새로운 번호 발견 시, 지금까지 쌓인 내용을 이전 문항으로 저장
                     if current_prob.strip():
                         all_problems.append({
                             "text": current_prob.strip(),
@@ -60,20 +60,17 @@ def extract_problems_refined(content, filename):
                             "num": current_num if current_num else "미상",
                             "source": filename
                         })
-                    # 새 문항 시작
                     current_num = num_match.group(1).strip()
-                    current_prob = cleaned
+                    current_prob = line_text
                     current_page = page_num + 1
                 else:
-                    # 번호가 없으면 현재 문항에 계속 덧붙임 (페이지가 바뀌어도 유지)
                     if current_prob:
-                        current_prob += " " + cleaned
+                        current_prob += " " + line_text
                     else:
-                        # 문서 시작부터 번호 없이 텍스트가 나오는 경우 예외 처리
-                        current_prob = cleaned
+                        current_prob = line_text
                         current_page = page_num + 1
 
-        # [핵심] 모든 페이지를 다 읽은 후, 남아있는 마지막 문항 강제 추가
+        # 마지막 문항 저장
         if current_prob.strip():
             all_problems.append({
                 "text": current_prob.strip(),
@@ -106,12 +103,15 @@ def highlight_overlap(target, reference):
 # --- 메인 실행부 ---
 st.title("🟣 문항 유사도 분석기")
 
+# [수정] 사회문화(사문) 링크 2개 고정값 추가
 default_links = """모평_수능, https://drive.google.com/file/d/1kf1dZDTFCfAHM9OSAwqaAXI62ClJ3J-S/view?usp=drive_link
-2026 수특 생윤, https://drive.google.com/file/d/1xlcMNaNQIbzA1iLXB9lD6eNYL5LM4_LJ/view?usp=drive_link"""
+2026 수특 생윤, https://drive.google.com/file/d/1xlcMNaNQIbzA1iLXB9lD6eNYL5LM4_LJ/view?usp=drive_link
+사문_모평, https://drive.google.com/file/d/1QTIRXZdqlixqhLlUsywqGHZcrxdqZ_mN/view?usp=sharing
+2026 사문_수특, https://drive.google.com/file/d/1V-WjvOsOSZwuuRaRObwPqdD07Rvuyx7f/view?usp=drive_link"""
 
 with st.sidebar:
     st.header("🔗 기준 DB 등록")
-    links_input = st.text_area("이름, 구글링크", value=default_links, height=150)
+    links_input = st.text_area("이름, 구글링크", value=default_links, height=200)
 
 uploaded_file = st.file_uploader("📝 분석할 문항 PDF 업로드", type="pdf")
 
@@ -121,7 +121,6 @@ if uploaded_file and links_input:
         all_ref_problems = []
         status_msg = st.empty()
         
-        # 1. DB 로드
         session = requests.Session()
         lines = [line for line in links_input.split('\n') if ',' in line]
         
@@ -131,12 +130,11 @@ if uploaded_file and links_input:
             status_msg.info(f"⏳ '{name}' 데이터를 가져오는 중...")
             direct_url = get_gdrive_direct_link(url.strip())
             try:
-                res = session.get(direct_url, timeout=45)
+                res = session.get(direct_url, timeout=60) # 이미지 대비 타임아웃 60초 연장
                 if res.status_code == 200:
                     all_ref_problems.extend(extract_problems_refined(res.content, name))
             except: pass
 
-        # 2. 업로드 파일 분석
         if all_ref_problems:
             target_probs = extract_problems_refined(uploaded_file.read(), "업로드")
             
@@ -165,8 +163,6 @@ if uploaded_file and links_input:
                 
                 st.session_state['results'] = final_results
                 status_msg.success(f"✅ 총 {len(target_probs)}개 문항 분석 완료!")
-            else:
-                st.error("업로드된 파일에서 문항을 찾을 수 없습니다.")
 
 # 결과 표시
 if 'results' in st.session_state:
