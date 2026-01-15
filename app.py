@@ -6,14 +6,14 @@ from io import BytesIO
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# 1. 페이지 설정 및 디자인
+# 1. 페이지 설정
 st.set_page_config(page_title="문항 유사도 분석기", layout="wide")
 st.markdown("""
     <style>
     .stApp { background-color: #F8F4FF; }
     h1, h2, h3 { color: #6F42C1 !important; }
-    div.stButton > button { background-color: #6F42C1; color: white; border-radius: 10px; font-weight: bold; height: 3.5em; }
-    .compare-box { border: 2px solid #E0D4F7; padding: 20px; border-radius: 15px; background-color: white; line-height: 1.8; }
+    div.stButton > button { background-color: #6F42C1; color: white; border-radius: 10px; font-weight: bold; height: 3.5em; width: 100%; }
+    .compare-box { border: 2px solid #E0D4F7; padding: 20px; border-radius: 15px; background-color: white; line-height: 1.8; min-height: 150px; }
     mark { background-color: #E6E0FF; color: #5A32A3; font-weight: bold; padding: 0 2px; }
     </style>
     """, unsafe_allow_html=True)
@@ -28,79 +28,73 @@ def get_gdrive_direct_link(url):
             file_id = match.group(1); break
     return f'https://drive.google.com/uc?export=download&id={file_id}' if file_id else url
 
-# --- [정밀도 극대화] 좌표 기반 텍스트 재정렬 및 추출 ---
+# --- [정밀도 최적화] 문항 분류 및 텍스트 추출 ---
 def extract_problems_refined(content, filename):
     try:
         doc = fitz.open(stream=content, filetype="pdf")
         all_problems = []
-        skip_keywords = ['학년도', '영역', '확인사항', '유의사항', '성명', '수험번호', '문제지', '탐구', '사회·문화', '생활과 윤리']
+        # 제외할 노이즈 키워드 강화
+        skip_keywords = ['학년도', '영역', '확인사항', '유의사항', '성명', '수험번호', '문제지', '탐구', '사회·문화', '생활과 윤리', '쪽', '교재']
         
-        current_prob = ""
+        current_prob_text = ""
         current_num = ""
         current_page = 1
 
         for page_num in range(len(doc)):
             page = doc.load_page(page_num)
-            # 텍스트를 개별 단어 단위로 좌표와 함께 추출
-            words = page.get_text("words") 
-            # 1. Y좌표(높이)로 1차 정렬, 2. X좌표(가로)로 2차 정렬하여 인간의 독서 순서 재현
-            words.sort(key=lambda w: (w[1], w[0])) 
+            # 좌표 기반으로 텍스트를 읽어 읽기 순서가 뒤섞이는 현상 방지
+            blocks = page.get_text("blocks", sort=True)
+            
+            for block in blocks:
+                line_text = block[4].replace('\n', ' ').strip()
+                if not line_text or len(line_text) < 2: continue
+                if any(kw in line_text for kw in skip_keywords): continue
 
-            # 단어들을 줄 단위로 묶기
-            lines = []
-            if words:
-                last_y = words[0][1]
-                current_line = []
-                for w in words:
-                    # Y좌표 차이가 작으면 같은 줄로 인식 (오차 범위 3포인트)
-                    if abs(w[1] - last_y) < 3:
-                        current_line.append(w[4])
-                    else:
-                        lines.append(" ".join(current_line))
-                        current_line = [w[4]]
-                        last_y = w[1]
-                lines.append(" ".join(current_line))
-
-            for line_text in lines:
-                cleaned = line_text.strip()
-                if not cleaned or len(cleaned) < 2: continue
-                if any(kw in cleaned for kw in skip_keywords): continue
-
-                # 문항 번호 감지 (강력한 패턴: 숫자 뒤 점/괄호/대괄호)
-                num_match = re.match(r'^(\d+[\.|\)]|\[\d+\])', cleaned)
+                # [문항 번호 판별 정규식 강화]
+                # 1. '1.', '20.' 등 숫자+마침표
+                # 2. '[1]', '[20]' 등 대괄호 숫자
+                # 3. '1)', '20)' 등 숫자+닫는괄호
+                # 단, 선지 번호(①~⑤)나 단순 날짜와 혼동되지 않도록 줄의 시작부분에서만 찾음
+                num_match = re.match(r'^(\d{1,2}[\.|\)]|\[\d{1,2}\])', line_text)
                 
+                # 문항 번호가 새로 발견된 경우
                 if num_match:
-                    if current_prob.strip():
+                    # 기존에 수집하던 문항이 있다면 저장
+                    if current_prob_text.strip():
                         all_problems.append({
-                            "text": current_prob.strip(),
+                            "text": re.sub(r'\s+', ' ', current_prob_text).strip(),
                             "page": current_page,
                             "num": current_num if current_num else "미상",
                             "source": filename
                         })
+                    
+                    # 새 문항 데이터 초기화
                     current_num = num_match.group(1).strip()
-                    current_prob = cleaned
+                    current_prob_text = line_text
                     current_page = page_num + 1
                 else:
-                    if current_prob:
-                        current_prob += " " + cleaned
+                    # 문항 번호가 아니면 현재 수집 중인 문항 본문에 합침
+                    if current_prob_text:
+                        current_prob_text += " " + line_text
                     else:
-                        current_prob = cleaned
+                        # 문서 맨 처음에 번호 없이 텍스트가 시작될 경우
+                        current_prob_text = line_text
                         current_page = page_num + 1
 
-        # 마지막 문항 수집
-        if current_prob.strip():
+        # 루프 종료 후 마지막 문항 저장
+        if current_prob_text.strip():
             all_problems.append({
-                "text": current_prob.strip(),
+                "text": re.sub(r'\s+', ' ', current_prob_text).strip(),
                 "page": current_page,
                 "num": current_num if current_num else "마지막",
                 "source": filename
             })
             
         return all_problems
-    except Exception as e:
+    except:
         return []
 
-# --- 하이라이팅 및 분석 로직 (동일) ---
+# --- 하이라이팅 및 분석 로직 (기존과 동일) ---
 def highlight_overlap(target, reference):
     if not target or not reference: return target
     ref_clean = re.sub(r'\s+', '', reference)
@@ -110,14 +104,13 @@ def highlight_overlap(target, reference):
         chunk = target[i:i+min_len]
         if len(chunk.strip()) < min_len: continue
         if re.sub(r'\s+', '', chunk) in ref_clean: to_highlight.append(chunk)
-    
     sorted_chunks = sorted(list(set(to_highlight)), key=len, reverse=True)
     result = target
     for chunk in sorted_chunks:
         if chunk in result: result = result.replace(chunk, f"[[MS]]{chunk}[[ME]]")
     return result.replace("[[MS]]", "<mark>").replace("[[ME]]", "</mark>").replace("</mark><mark>", "")
 
-# --- 메인 실행부 (고정 링크 포함) ---
+# --- 메인 레이아웃 및 실행 ---
 st.title("🟣 문항 유사도 분석기")
 
 default_links = """모평_수능, https://drive.google.com/file/d/1kf1dZDTFCfAHM9OSAwqaAXI62ClJ3J-S/view?usp=drive_link
@@ -126,42 +119,37 @@ default_links = """모평_수능, https://drive.google.com/file/d/1kf1dZDTFCfAHM
 2026 사문_수특, https://drive.google.com/file/d/1V-WjvOsOSZwuuRaRObwPqdD07Rvuyx7f/view?usp=drive_link"""
 
 with st.sidebar:
-    st.header("🔗 기준 DB 등록")
+    st.header("🔗 기준 DB 설정")
     links_input = st.text_area("이름, 구글링크", value=default_links, height=200)
+    if st.button("🔄 결과 초기화"):
+        if 'results' in st.session_state: del st.session_state['results']
+        st.rerun()
 
-uploaded_file = st.file_uploader("📝 분석할 문항 PDF 업로드", type="pdf")
+uploaded_file = st.file_uploader("📝 분석할 대상 PDF 업로드", type="pdf")
 
 if uploaded_file and links_input:
     if st.button("🚀 정밀 분석 시작"):
         final_results = []
         all_ref_problems = []
-        status_msg = st.empty()
         
-        session = requests.Session()
-        lines = [line for line in links_input.split('\n') if ',' in line]
-        
-        for line in lines:
-            name, url = line.split(',', 1)
-            name = name.strip()
-            status_msg.info(f"⏳ '{name}' 데이터를 분석용으로 재구성 중...")
-            direct_url = get_gdrive_direct_link(url.strip())
-            try:
-                res = session.get(direct_url, timeout=60)
-                if res.status_code == 200:
-                    all_ref_problems.extend(extract_problems_refined(res.content, name))
-            except: pass
+        with st.spinner("데이터를 분석하고 대조하는 중입니다..."):
+            session = requests.Session()
+            lines = [l for l in links_input.split('\n') if ',' in l]
+            for line in lines:
+                name, url = line.split(',', 1)
+                direct_url = get_gdrive_direct_link(url.strip())
+                try:
+                    res = session.get(direct_url, timeout=60)
+                    if res.status_code == 200:
+                        all_ref_problems.extend(extract_problems_refined(res.content, name.strip()))
+                except: pass
 
-        if all_ref_problems:
             target_probs = extract_problems_refined(uploaded_file.read(), "업로드")
             
-            if target_probs:
-                prog = st.progress(0)
+            if all_ref_problems and target_probs:
+                prog_bar = st.progress(0)
                 vectorizer = TfidfVectorizer(ngram_range=(2, 4), analyzer='char')
-                
                 for i, target in enumerate(target_probs):
-                    t_num = target.get('num', '미상')
-                    status_msg.info(f"🔍 {i+1}번({t_num}) 문항 대조 중...")
-                    
                     best_score, best_match = 0, None
                     for ref in all_ref_problems:
                         try:
@@ -170,12 +158,33 @@ if uploaded_file and links_input:
                             if score > best_score:
                                 best_score, best_match = score, ref
                         except: continue
-                    
                     final_results.append({
-                        "id": i + 1, "target": target['text'], "num": t_num,
+                        "id": i+1, "target": target['text'], "num": target['num'], 
                         "score": round(best_score*100, 1), "match": best_match
                     })
-                    prog.progress((i + 1) / len(target_probs))
+                    prog_bar.progress((i + 1) / len(target_probs))
                 
                 st.session_state['results'] = final_results
-                status_msg.success(f"✅ 총 {len(target_probs)}개 문항 정렬 분석 완료!")
+                st.success(f"✅ 분석 완료! 총 {len(target_probs)}개 문항이 인식되었습니다.")
+            else:
+                st.error("문항을 제대로 읽어오지 못했습니다. PDF 형식을 확인해 주세요.")
+
+# 결과 표시 영역
+if 'results' in st.session_state:
+    st.markdown("### 📊 분석 결과 리스트")
+    for res in st.session_state['results']:
+        score, match, num = res['score'], res['match'], res['num']
+        color = "🔴" if score > 65 else "🟡" if score > 35 else "🟢"
+        status = "위험" if score > 65 else "주의" if score > 35 else "안전"
+        match_info = f" | [매칭: {match['source']} {match['page']}p {match['num']}]" if match else " | 매칭 데이터 없음"
+        
+        with st.expander(f"{color} {status} ({score}%) - {num}번 문항 {match_info}"):
+            c1, c2 = st.columns(2)
+            if match:
+                h_target = highlight_overlap(res['target'], match['text'])
+                h_match = highlight_overlap(match['text'], res['target'])
+                with c1: st.markdown(f"**[내 문항]**<div class='compare-box'>{h_target}</div>", unsafe_allow_html=True)
+                with c2: st.markdown(f"**[DB 문항]**<div class='compare-box'>{h_match}</div>", unsafe_allow_html=True)
+            else:
+                with c1: st.markdown(f"**[내 문항]**<div class='compare-box'>{res['target']}</div>", unsafe_allow_html=True)
+                with c2: st.info("유사한 문항을 찾지 못했습니다.")
