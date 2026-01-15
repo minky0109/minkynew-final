@@ -7,7 +7,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 # 1. 페이지 설정
-st.set_page_config(page_title="사문/생윤 문항 분석기", layout="wide")
+st.set_page_config(page_title="사문/생윤 정밀 분석기", layout="wide")
 st.markdown("""
     <style>
     .stApp { background-color: #F8F4FF; }
@@ -28,68 +28,74 @@ def get_gdrive_direct_link(url):
             file_id = match.group(1); break
     return f'https://drive.google.com/uc?export=download&id={file_id}' if file_id else url
 
-# --- [사문 특화] 문항 및 선지 통합 추출 로직 ---
+# --- [정밀 최적화] 문항 추출 로직 ---
 def extract_problems_refined(content, filename):
     try:
         doc = fitz.open(stream=content, filetype="pdf")
         all_problems = []
-        skip_keywords = ['학년도', '영역', '확인사항', '유의사항', '성명', '수험번호', '문제지', '탐구', '사회·문화', '생활과 윤리']
+        # 헤더 노이즈 제거 키워드
+        skip_keywords = ['학년도', '영역', '확인사항', '유의사항', '성명', '수험번호', '문제지', '탐구', '사회·문화', '생활과 윤리', '교재', '쪽', '대학수학능력시험']
         
         current_prob_text = ""
         current_num = ""
+        current_num_val = 0 # 정렬을 위한 숫자 값
         current_page = 1
 
         for page_num in range(len(doc)):
             page = doc.load_page(page_num)
-            # 'blocks' 모드로 텍스트 덩어리를 순서대로 가져옴
+            # 좌표 기반으로 텍스트 덩어리 추출
             blocks = page.get_text("blocks", sort=True)
             
             for block in blocks:
+                # block[1]은 y0(높이) 좌표. 상단 80px 이하는 헤더일 확률이 높음
+                if block[1] < 80: continue 
+                
                 line_text = block[4].replace('\n', ' ').strip()
                 if not line_text or len(line_text) < 2: continue
                 if any(kw in line_text for kw in skip_keywords): continue
 
-                # [개선된 문항 번호 인식] 
-                # 줄의 시작이 숫자 + . 또는 숫자 + ) 또는 [숫자] 인 경우만! 
-                # (원문자 ①②③④⑤는 무시하여 제시문-선지가 분리되지 않게 함)
-                num_match = re.match(r'^(\d{1,2}[\.|\)]|\[\d{1,2}\])', line_text)
+                # 문항 번호 정규식: 시작이 '숫자.' 또는 '숫자)' 또는 '[숫자]'
+                num_match = re.match(r'^(\d{1,2})[\.|\)|\]]', line_text)
                 
                 if num_match:
-                    # 새로운 문항 번호가 나오면 이전까지 모은 '제시문+선지'를 저장
+                    # 새로운 문항 번호 발견 시 이전 문항 저장
                     if current_prob_text.strip():
                         all_problems.append({
                             "text": re.sub(r'\s+', ' ', current_prob_text).strip(),
                             "page": current_page,
-                            "num": current_num if current_num else "미상",
+                            "num": current_num,
+                            "num_val": current_num_val,
                             "source": filename
                         })
                     
-                    current_num = num_match.group(1).strip()
+                    current_num_val = int(num_match.group(1))
+                    current_num = f"{current_num_val}"
                     current_prob_text = line_text
                     current_page = page_num + 1
                 else:
-                    # 문항 번호가 아니면 (선지 번호나 지문 내용이면) 현재 문항에 계속 붙임
                     if current_prob_text:
                         current_prob_text += " " + line_text
                     else:
-                        # 번호 없이 시작되는 경우 (예외처리)
-                        current_prob_text = line_text
-                        current_page = page_num + 1
+                        # 번호 없이 시작되는 텍스트(헤더 제외)는 무시하거나 첫 문제에 합침
+                        pass
 
         # 마지막 문항 저장
         if current_prob_text.strip():
             all_problems.append({
                 "text": re.sub(r'\s+', ' ', current_prob_text).strip(),
                 "page": current_page,
-                "num": current_num if current_num else "마지막",
+                "num": current_num,
+                "num_val": current_num_val,
                 "source": filename
             })
             
+        # [핵심] 문항 번호 숫자 순으로 정렬 (1번부터 20번까지)
+        all_problems.sort(key=lambda x: x['num_val'])
         return all_problems
     except:
         return []
 
-# --- 하이라이팅 및 분석 로직 ---
+# --- 하이라이팅 로직 ---
 def highlight_overlap(target, reference):
     if not target or not reference: return target
     ref_clean = re.sub(r'\s+', '', reference)
@@ -105,8 +111,8 @@ def highlight_overlap(target, reference):
         if chunk in result: result = result.replace(chunk, f"[[MS]]{chunk}[[ME]]")
     return result.replace("[[MS]]", "<mark>").replace("[[ME]]", "</mark>").replace("</mark><mark>", "")
 
-# --- 메인 UI 및 실행 ---
-st.title("🟣 사문/생윤 문항 유사도 분석기")
+# --- 메인 실행부 ---
+st.title("🟣 사문/생윤 정밀 문항 분석기")
 
 default_links = """모평_수능, https://drive.google.com/file/d/1kf1dZDTFCfAHM9OSAwqaAXI62ClJ3J-S/view?usp=drive_link
 2026 수특 생윤, https://drive.google.com/file/d/1xlcMNaNQIbzA1iLXB9lD6eNYL5LM4_LJ/view?usp=drive_link
@@ -127,7 +133,7 @@ if uploaded_file and links_input:
         final_results = []
         all_ref_problems = []
         
-        with st.spinner("사문/생윤 문항을 정밀 분석 중입니다..."):
+        with st.spinner("DB 및 업로드 문항을 정밀 분석 중입니다..."):
             session = requests.Session()
             lines = [l for l in links_input.split('\n') if ',' in l]
             for line in lines:
@@ -155,26 +161,30 @@ if uploaded_file and links_input:
                         except: continue
                     final_results.append({
                         "id": i+1, "target": target['text'], "num": target['num'], 
-                        "score": round(best_score*100, 1), "match": best_match
+                        "num_val": target['num_val'], "score": round(best_score*100, 1), "match": best_match
                     })
                     prog_bar.progress((i + 1) / len(target_probs))
                 
+                # 결과 표시 전 최종 정렬
+                final_results.sort(key=lambda x: x['num_val'])
                 st.session_state['results'] = final_results
-                st.success(f"✅ 분석 완료! {len(target_probs)}개 문항 세트가 인식되었습니다.")
+                st.success(f"✅ 분석 완료! 총 {len(target_probs)}개 문항이 순서대로 정렬되었습니다.")
 
 # 결과 표시 영역
 if 'results' in st.session_state:
+    st.markdown("### 📊 분석 결과 (1번~20번 순서)")
     for res in st.session_state['results']:
         score, match, num = res['score'], res['match'], res['num']
         color = "🔴" if score > 65 else "🟡" if score > 35 else "🟢"
-        match_info = f" | [매칭: {match['source']} {match['page']}p {match['num']}]" if match else " | 매칭 없음"
+        match_info = f" | [매칭: {match['source']} {match['page']}p {match['num']}번]" if match else " | 매칭 데이터 없음"
         
         with st.expander(f"{color} {num}번 문항 (유사도 {score}%){match_info}"):
             c1, c2 = st.columns(2)
             if match:
                 h_target = highlight_overlap(res['target'], match['text'])
                 h_match = highlight_overlap(match['text'], res['target'])
-                with c1: st.markdown(f"**[내 문항 (제시문+선지)]**<div class='compare-box'>{h_target}</div>", unsafe_allow_html=True)
-                with c2: st.markdown(f"**[DB 문항 (제시문+선지)]**<div class='compare-box'>{h_match}</div>", unsafe_allow_html=True)
+                with c1: st.markdown(f"**[내 문항]**<div class='compare-box'>{h_target}</div>", unsafe_allow_html=True)
+                with c2: st.markdown(f"**[DB 문항]**<div class='compare-box'>{h_match}</div>", unsafe_allow_html=True)
             else:
-                with c1: st.markdown(f"<div class='compare-box'>{res['target']}</div>", unsafe_allow_html=True)
+                with c1: st.markdown(f"**[내 문항]**<div class='compare-box'>{res['target']}</div>", unsafe_allow_html=True)
+                with c2: st.info("유사 문항 없음")
