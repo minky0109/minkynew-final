@@ -79,7 +79,7 @@ def highlight_selective(target, reference):
     return result.replace("[[MS]]", "<mark>").replace("[[ME]]", "</mark>").replace("</mark><mark>", "")
 
 # --- UI 레이아웃 ---
-st.title("🟣 문항 유사도 분석기 (Drive 연동)")
+st.title("🟣 문항 유사도 분석기 ")
 
 # 사이드바에서 기준 PDF 링크 관리
 with st.sidebar:
@@ -136,4 +136,5 @@ if 'drive_results' in st.session_state:
             if match:
                 c1, c2 = st.columns(2)
                 with c1: st.markdown(f"<div class='compare-box'><b>[출제]</b><hr>{highlight_selective(res['target'], match['text'])}</div>", unsafe_allow_html=True)
+
                 with c2: st.markdown(f"<div class='compare-box'><b>[DB]</b><hr>{highlight_selective(match['text'], res['target'])}</div>", unsafe_allow_html=True)
